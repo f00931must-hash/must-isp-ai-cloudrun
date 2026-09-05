@@ -18,7 +18,7 @@ async function callGemini(text,mode,section){
   const instruction=mode==='needs-assessment'?ISP_NEEDS:mode==='service-evaluation'?ISP_SERVICE:ISP_SUMMARY;
   const task=mode==='needs-assessment'?'請依下列資料產生學生需求評估列點：':mode==='service-evaluation'?'請依下列資料產生服務評估摘要：':`請潤飾以下 ISP「${section||'現況能力摘要'}」內容，務必實質改寫並直接給可使用結果：`;
   const c=new AbortController();
-  const timer=setTimeout(()=>c.abort(),12000);
+  const timer=setTimeout(()=>c.abort(),30000);
   try{
     const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(MODEL)}:generateContent`,{
       method:'POST',
@@ -49,7 +49,7 @@ async function handle(body){
     return [200,{success:true,polished:out,model:MODEL}];
   }catch(e){
     const m=String(e?.message||'').toLowerCase();
-    if(e?.name==='AbortError')return [504,{success:false,error:'AI 回應逾時，請稍後再試；原始內容不會遺失。'}];
+    if(e?.name==='AbortError')return [504,{success:false,error:'AI 回應超過30秒，請稍後再試；原始內容不會遺失。'}];
     if(m.includes('location is not supported')||m.includes('user location'))return [502,{success:false,error:'AI 服務目前受到地區限制，請稍後再試；原始內容不會遺失。'}];
     if(e?.status===429)return [429,{success:false,error:'Gemini 專案目前沒有可用呼叫額度，請確認 API 金鑰所屬專案；原始內容不會遺失。'}];
     return [502,{success:false,error:e?.message||'AI 服務暫時無法使用，請稍後再試；原始內容不會遺失。'}];
@@ -63,7 +63,7 @@ http.createServer((req,res)=>{
     if(!allowed(origin))return send(res,403,{success:false,error:'不允許的網站來源'},origin);
     res.writeHead(204,headers(origin));return res.end();
   }
-  if(req.method==='GET'&&url.pathname==='/')return send(res,200,{success:true,service:'MUST ISP AI Cloud Run',version:'1.0.3',region:'asia-east1',route:'POST /ai/isp-summary',model:MODEL},origin);
+  if(req.method==='GET'&&url.pathname==='/')return send(res,200,{success:true,service:'MUST ISP AI Cloud Run',version:'1.0.4',region:'asia-east1',route:'POST /ai/isp-summary',model:MODEL,timeoutSeconds:30},origin);
   if(req.method!=='POST'||url.pathname!=='/ai/isp-summary')return send(res,404,{success:false,error:'找不到此 API 路徑'},origin);
   if(!allowed(origin))return send(res,403,{success:false,error:'不允許的網站來源'},origin);
   if(!KEY)return send(res,500,{success:false,error:'尚未設定 GEMINI_API_KEY'},origin);
