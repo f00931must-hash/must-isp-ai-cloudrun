@@ -1,7 +1,7 @@
 const http=require('http');
 const PORT=process.env.PORT||8080;
 const KEY=process.env.GEMINI_API_KEY||'';
-const MODELS=['gemini-3.5-flash-lite','gemini-3.1-flash-lite'];
+const MODEL='gemini-3.6-flash';
 
 const ISP_SUMMARY=`你是臺灣大專校院資源教室的 ISP 行政文字助理。只依使用者提供內容潤飾，不得新增未提供的學生資訊、診斷、原因、能力、需求、服務或事件。保留原意、日期、數字、程度與事件順序。使用正式、客觀、中性、適合 ISP 文件的繁體中文。只要按下 AI 潤飾就必須實質改寫，至少改善用詞、句型、語序、行政文體或標點其中一項，不得直接照返原文，也不得回覆「內容已經很好」或「無需修改」。原文有列點時，列點數量、順序、前綴與換行必須完全保留，不得合併、拆分、刪除或新增列點。原文沒有列點時不得自行新增列點。原則上整理為至少30個中文字；可延展原文已明確表達的意思，但不得虛構。只輸出可直接貼回欄位的文字，不要標題、前言、說明、引號或 Markdown。`;
 
@@ -14,20 +14,20 @@ function headers(origin){return {'Content-Type':'application/json; charset=utf-8
 function send(res,status,data,origin=''){res.writeHead(status,headers(origin));res.end(JSON.stringify(data));}
 function clean(s){return String(s||'').replace(/^```(?:text|markdown)?\s*/i,'').replace(/\s*```$/i,'').replace(/^(?:潤飾後(?:的)?內容|內容摘述)[：:]\s*/i,'').trim();}
 
-async function callGemini(text,mode,section,model){
+async function callGemini(text,mode,section){
   const instruction=mode==='needs-assessment'?ISP_NEEDS:mode==='service-evaluation'?ISP_SERVICE:ISP_SUMMARY;
   const task=mode==='needs-assessment'?'請依下列資料產生學生需求評估列點：':mode==='service-evaluation'?'請依下列資料產生服務評估摘要：':`請潤飾以下 ISP「${section||'現況能力摘要'}」內容，務必實質改寫並直接給可使用結果：`;
   const c=new AbortController();
-  const timer=setTimeout(()=>c.abort(),8000);
+  const timer=setTimeout(()=>c.abort(),12000);
   try{
-    const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,{
+    const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(MODEL)}:generateContent`,{
       method:'POST',
       headers:{'Content-Type':'application/json','x-goog-api-key':KEY},
       signal:c.signal,
       body:JSON.stringify({
         systemInstruction:{parts:[{text:instruction}]},
         contents:[{role:'user',parts:[{text:`${task}\n\n${text}`}]}],
-        generationConfig:{temperature:mode==='summary'?0.3:0.2,topP:0.8,maxOutputTokens:mode==='summary'?500:900}
+        generationConfig:{temperature:mode==='summary'?0.3:0.2,topP:0.8,maxOutputTokens:mode==='summary'?600:1000}
       })
     });
     const data=await r.json().catch(()=>({}));
@@ -38,19 +38,6 @@ async function callGemini(text,mode,section,model){
   }finally{clearTimeout(timer);}
 }
 
-async function callWithFallback(text,mode,section){
-  let lastError=null;
-  for(const model of MODELS){
-    try{return {text:await callGemini(text,mode,section,model),model};}
-    catch(e){
-      lastError=e;
-      const retryable=e?.status===429||e?.status===500||e?.status===502||e?.status===503||e?.status===504||e?.name==='AbortError';
-      if(!retryable)throw e;
-    }
-  }
-  throw lastError||new Error('AI 服務暫時無法使用');
-}
-
 async function handle(body){
   const text=String(body?.text||'').trim();
   const mode=['summary','needs-assessment','service-evaluation'].includes(body?.mode)?body.mode:'summary';
@@ -58,13 +45,13 @@ async function handle(body){
   if(!text)return [400,{success:false,error:'內容不可空白'}];
   if(text.length>6000)return [400,{success:false,error:'內容過長，目前上限為 6000 字'}];
   try{
-    const result=await callWithFallback(text,mode,section);
-    return [200,{success:true,polished:result.text,model:result.model}];
+    const out=await callGemini(text,mode,section);
+    return [200,{success:true,polished:out,model:MODEL}];
   }catch(e){
     const m=String(e?.message||'').toLowerCase();
     if(e?.name==='AbortError')return [504,{success:false,error:'AI 回應逾時，請稍後再試；原始內容不會遺失。'}];
     if(m.includes('location is not supported')||m.includes('user location'))return [502,{success:false,error:'AI 服務目前受到地區限制，請稍後再試；原始內容不會遺失。'}];
-    if(e?.status===429)return [429,{success:false,error:'Gemini 免費額度目前受限，系統已嘗試備援模型；請稍後再試，原始內容不會遺失。'}];
+    if(e?.status===429)return [429,{success:false,error:'Gemini 專案目前沒有可用呼叫額度，請確認 API 金鑰所屬專案；原始內容不會遺失。'}];
     return [502,{success:false,error:e?.message||'AI 服務暫時無法使用，請稍後再試；原始內容不會遺失。'}];
   }
 }
@@ -76,7 +63,7 @@ http.createServer((req,res)=>{
     if(!allowed(origin))return send(res,403,{success:false,error:'不允許的網站來源'},origin);
     res.writeHead(204,headers(origin));return res.end();
   }
-  if(req.method==='GET'&&url.pathname==='/')return send(res,200,{success:true,service:'MUST ISP AI Cloud Run',version:'1.0.2',region:'asia-east1',route:'POST /ai/isp-summary',models:MODELS},origin);
+  if(req.method==='GET'&&url.pathname==='/')return send(res,200,{success:true,service:'MUST ISP AI Cloud Run',version:'1.0.3',region:'asia-east1',route:'POST /ai/isp-summary',model:MODEL},origin);
   if(req.method!=='POST'||url.pathname!=='/ai/isp-summary')return send(res,404,{success:false,error:'找不到此 API 路徑'},origin);
   if(!allowed(origin))return send(res,403,{success:false,error:'不允許的網站來源'},origin);
   if(!KEY)return send(res,500,{success:false,error:'尚未設定 GEMINI_API_KEY'},origin);
