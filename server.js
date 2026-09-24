@@ -2,7 +2,7 @@ const http=require('http');
 const PORT=process.env.PORT||8080;
 const KEY=process.env.GEMINI_API_KEY||'';
 const MODELS=['gemini-3.6-flash','gemini-3.5-flash-lite','gemini-3.1-flash-lite'];
-const VERSION='1.3.0';
+const VERSION='1.3.1';
 
 const ISP_SUMMARY=`你是臺灣大專校院資源教室的 ISP 行政文字助理。只依使用者提供內容潤飾，不得新增未提供的學生資訊、診斷、原因、能力、需求、服務或事件。保留原意、日期、數字、程度與事件順序。使用正式、客觀、中性、適合 ISP 文件的繁體中文。只要按下 AI 潤飾就必須實質改寫，至少改善用詞、句型、語序、行政文體或標點其中一項，不得直接照返原文，也不得回覆「內容已經很好」或「無需修改」。原文有列點時，列點數量、順序、前綴與換行必須完全保留，不得合併、拆分、刪除或新增列點。原文沒有列點時不得自行新增列點。原則上整理為至少30個中文字；可延展原文已明確表達的意思，但不得虛構。每一句都必須完整收尾，不得以「且、並、以及、於……中、於……時」等尚未完成的語句結束。只輸出可直接貼回欄位的文字，不要標題、前言、說明、引號或 Markdown。`;
 const ISP_NEEDS=`你是臺灣大專校院資源教室的 ISP 行政文字助理。依輸入的現況能力摘要、學生優弱勢與現況分析，產生「學生需求評估」。不得使用或推測姓名、障別、診斷、病史、證明、家庭資料、家長期望或自我期望。先辨識真正需要支持的困難，再轉化為具體服務需求，不要只是改寫摘要。使用阿拉伯數字逐點輸出。需求標題要依內容命名，例如「學業需求」「情緒支持需求」「溝通支持需求」「人際適應需求」「生活適應需求」「生涯／轉銜需求」，不可每點固定寫成「服務需求」。相同性質整合，不同需求分點。正常、穩定、與一般學生相當或不適用面向不列入。沒有資料不要補寫。原則上一至六項。若無明顯特殊需求，只輸出「1. 持續追蹤：目前整體適應尚可，暫無明顯特殊服務需求，後續依實際適應情形持續追蹤。」每一點都必須是完整句子。只輸出可直接貼入欄位的列點。`;
@@ -48,7 +48,47 @@ async function callGemini(text,mode,section,model,timeoutMs=12000){
   const p=promptFor(mode,section),c=new AbortController(),timer=setTimeout(()=>c.abort(),timeoutMs);
   try{const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,{method:'POST',headers:{'Content-Type':'application/json','x-goog-api-key':KEY},signal:c.signal,body:JSON.stringify({systemInstruction:{parts:[{text:p.instruction}]},contents:[{role:'user',parts:[{text:`${p.task}\n\n${text}`}]}],generationConfig:{temperature:p.temperature,topP:0.8,maxOutputTokens:p.maxOutputTokens}})});const data=await r.json().catch(()=>({}));if(!r.ok){const e=new Error(data?.error?.message||`Gemini API error ${r.status}`);e.status=r.status;throw e;}const candidate=data?.candidates?.[0],out=clean(candidate?.content?.parts?.map(x=>x?.text||'').join(''));if(!out)throw new Error('AI 未回傳可用文字');if(looksIncomplete(out,candidate?.finishReason||'')){const e=new Error('AI 回傳內容疑似未完整結束');e.status=598;throw e;}return out;}finally{clearTimeout(timer);}
 }
-async function callWithFallback(text,mode,section){const attempts=[];let lastError=null;for(let i=0;i<MODELS.length;i++){const model=MODELS[i];try{return {text:await callGemini(text,mode,section,model,i===0?10000:12000),model,attempts};}catch(error){lastError=error;attempts.push({model,status:error?.status||0,message:String(error?.message||'').slice(0,120)});console.warn('AI attempt failed',{model,status:error?.status||0,name:error?.name||'',message:String(error?.message||'').slice(0,120)});if(!isRetryable(error))throw error;if(i<MODELS.length-1)await sleep(250);}}const e=lastError||new Error('AI 服務暫時無法使用');e.attempts=attempts;throw e;}
+async function callWithFallback(text,mode,section){
+  const attempts=[];
+  let lastError=null;
+  let backoffStep=0;
+
+  for(let i=0;i<MODELS.length;i++){
+    const model=MODELS[i];
+    const maxTries=2;
+
+    for(let tryNo=1;tryNo<=maxTries;tryNo++){
+      try{
+        return {text:await callGemini(text,mode,section,model,i===0?12000:15000),model,attempts};
+      }catch(error){
+        lastError=error;
+        attempts.push({model,tryNo,status:error?.status||0,message:String(error?.message||'').slice(0,160)});
+        console.warn('AI attempt failed',{
+          model,
+          tryNo,
+          status:error?.status||0,
+          name:error?.name||'',
+          message:String(error?.message||'').slice(0,160)
+        });
+
+        if(!isRetryable(error))throw error;
+
+        const hasAnotherTry=tryNo<maxTries;
+        const hasAnotherModel=i<MODELS.length-1;
+        if(hasAnotherTry||hasAnotherModel){
+          const waits=[1000,2000,4000];
+          const delay=waits[Math.min(backoffStep,waits.length-1)];
+          backoffStep++;
+          await sleep(delay);
+        }
+      }
+    }
+  }
+
+  const e=lastError||new Error('AI 服務暫時無法使用');
+  e.attempts=attempts;
+  throw e;
+}
 async function handle(body,forcedMode=''){const text=String(body?.text||'').trim(),mode=forcedMode||(['summary','needs-assessment','service-evaluation'].includes(body?.mode)?body.mode:'summary'),section=String(body?.section||'').trim();if(!text)return [400,{success:false,error:'內容不可空白'}];if(text.length>6000)return [400,{success:false,error:'內容過長，目前上限為 6000 字'}];try{const result=await callWithFallback(text,mode,section);return [200,{success:true,polished:result.text,model:result.model}];}catch(e){return aiError(e);}}
 function aiError(e){const m=String(e?.message||'').toLowerCase();if(e?.status===598)return [502,{success:false,error:'AI 回傳內容不完整，系統已嘗試備援模型；請再試一次，原始內容不會遺失。'}];if(m.includes('location is not supported')||m.includes('user location'))return [502,{success:false,error:'AI 服務目前受到地區限制，請稍後再試；原始內容不會遺失。'}];if(e?.status===429)return [429,{success:false,error:'AI 目前使用量較高，系統已自動嘗試其他模型；請稍後再試，原始內容不會遺失。'}];if(e?.status===503||m.includes('high demand')||m.includes('unavailable'))return [503,{success:false,error:'Google AI 目前忙碌，系統已自動切換備援模型但仍無法完成；請稍後再試，原始內容不會遺失。'}];if(e?.name==='AbortError')return [504,{success:false,error:'AI 多模型嘗試皆逾時，請稍後再試；原始內容不會遺失。'}];return [502,{success:false,error:e?.message||'AI 服務暫時無法使用，請稍後再試；原始內容不會遺失。'}];}
 
