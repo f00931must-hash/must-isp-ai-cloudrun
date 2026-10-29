@@ -110,7 +110,7 @@ async function callVisionFallback(images,kind,context={}){let lastError=null,bes
 // Combined names are split structurally. Semester assignments require explicit image evidence.
 function canonicalCurriculumName(c){
  const strip=value=>String(value||'').replace(/^[\s◇◆◊◎○●☆★※＊*]+(?:\s*[ABＡＢ](?=[\u3400-\u9fff]))?\s*/u,'').trim();
- const name=strip(c?.name),raw=strip(c?.rawName),match=raw.match(/^(.*?)([（(][一二三四五六七八1-8][）)])$/);
+ const name=strip(c?.name),raw=strip(c?.rawName),match=raw.match(/^([^（）()]*)([（(][一二三四五六七八1-8][）)])$/);
  return match&&name===match[1].trim()?raw:name;
 }
 function splitCurriculumName(value){
