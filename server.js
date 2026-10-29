@@ -2,7 +2,7 @@ const http=require('http');
 const PORT=process.env.PORT||8080;
 const KEY=process.env.GEMINI_API_KEY||'';
 const MODELS=['gemini-3.6-flash','gemini-3.5-flash-lite','gemini-3.1-flash-lite'];
-const VERSION='1.4.1';
+const VERSION='1.4.2';
 const {findSources,schoolFetch}=require('./curriculum-sources');
 
 const ISP_SUMMARY=`你是臺灣大專校院資源教室的 ISP 行政文字助理。只依使用者提供內容潤飾，不得新增未提供的學生資訊、診斷、原因、能力、需求、服務或事件。保留原意、日期、數字、程度與事件順序。使用正式、客觀、中性、適合 ISP 文件的繁體中文。只要按下 AI 潤飾就必須實質改寫，至少改善用詞、句型、語序、行政文體或標點其中一項，不得直接照返原文，也不得回覆「內容已經很好」或「無需修改」。原文有列點時，列點數量、順序、前綴與換行必須完全保留，不得合併、拆分、刪除或新增列點。原文沒有列點時不得自行新增列點。原則上整理為至少30個中文字；可延展原文已明確表達的意思，但不得虛構。每一句都必須完整收尾，不得以「且、並、以及、於……中、於……時」等尚未完成的語句結束。只輸出可直接貼回欄位的文字，不要標題、前言、說明、引號或 Markdown。`;
@@ -10,7 +10,7 @@ const ISP_NEEDS=`你是臺灣大專校院資源教室的 ISP 行政文字助理�
 const ISP_SERVICE=`你是臺灣大專校院資源教室的 ISP 行政文字助理。依學生需求評估、八項現況能力摘要及老師填寫的具體說明，產生「服務評估摘要」。已勾選的支持策略與服務僅用來核對方向，不要逐項羅列。聚焦一至三項核心需求及其對就學、生活適應或人際互動的影響，整合成一段連貫文字，包含整體現況與主要需求、支持重點及後續追蹤方向。僅使用明確提供的事實，不得新增、猜測或推論。尚未實施的服務不可寫成已有成效。原則上80至160個中文字。每一句都必須完整收尾。只輸出可直接貼入欄位的文字。`;
 const SERVICE_POLISH=`你是臺灣大專校院資源教室的「服務紀錄內容摘述」文字助理。只依老師提供的原文進行潤飾，不得新增原文沒有的學生資訊、診斷、原因、事件、服務、成效、人物、日期或判斷。保留原意、時間、對象、事件順序與程度。請將口語、零碎或不完整的敘述整理成正式、客觀、中性、自然且適合資源教室服務紀錄的繁體中文。可改善語序、用詞、標點與句型，使內容更清楚，但不得把推測寫成事實。若原文有列點或分行，盡量保留原本結構；若原文為一段文字，不要自行新增標題或固定格式。不得回覆「內容已經很好」「無需修改」等說明。每一句都必須完整收尾。只輸出可直接貼回「內容摘述」欄位的文字，不要標題、前言、引號、Markdown 或額外說明。`;
 
-const CREDIT_CURRICULUM=`【強制核對規則】先定位各學年、上下學期及各自學分與時數的欄位座標，再逐列讀取。不可依文字抽取順序或課名序號猜學期。分類必須依該列所屬合併儲存格的校必修/院必修/專業必修/選修，不可把院誤作校。逐字核對課名，模糊字不要自行補成常見課。◇、◎等前置符號與搭配的A/B為註記，從name移除、另放annotation及rawName；有意義的英文保留。合併課名如(一)(二)、(三)(四)、(五)(六)，只有同列各學期格明確時才拆成每學期獨立一門，credits取該學期學分，不能取時數或兩學期總和；請優先讀取該列上學期、下學期的學分格完成拆分，不能僅因課名含兩個序號就丟入reviewRows。合併課程可輸出semesterEntries:[{term:"1-1",credits:2},{term:"1-2",credits:2}]，順序與課名序號對應；term必須來自原圖學年與學期格。只有真的看不清楚時才標needsReview。即使待核對也須分成個別課名，並保留看得清楚的學期與學分，不可把整列黏在一起或丟棄。每門courses另附sourcePage、rawName、annotation；不確定的列放reviewRows，不可悄悄刪除。0學分保留。分類小計與必修加總應核對原表；表列選修總和不一定等於畢業所需選修學分，不可據此改門檻。最後重新按原圖逐列檢查漏列、欄位偏移與錯字。
+const CREDIT_CURRICULUM=`【學期定位最高優先規則】term的第一碼只代表原表「第幾學年」，第二碼只代表該學年的上/下學期。第一學年上=1-1、下=1-2；第二學年上=2-1、下=2-2；第三學年上=3-1、下=3-2；第四學年上=4-1、下=4-2。第一學年(115)中的115是入學民國年，不是term第一碼；第二學年(116)仍為2。每個橫向學年區塊需獨立定位，不可把全表的上學期全放1-1。先定位課程格正上方跨欄的學年標頭，再定位該學年內的上/下學期學分格；課名序號、課程所在列數、PDF文字擷取順序均不可決定學年。每門courses及每個semesterEntries必須輸出yearIndex:1至8、semesterIndex:1或2、yearHeader:原圖學年標頭、semesterHeader:原圖學期標頭；term由yearIndex與semesterIndex組合。找不到標頭對應時needsReview=true，不可自行預設1-1。\n【強制核對規則】先定位各學年、上下學期及各自學分與時數的欄位座標，再逐列讀取。不可依文字抽取順序或課名序號猜學期。分類必須依該列所屬合併儲存格的校必修/院必修/專業必修/選修，不可把院誤作校。逐字核對課名，模糊字不要自行補成常見課。◇、◎等前置符號與搭配的A/B為註記，從name移除、另放annotation及rawName；有意義的英文保留。合併課名如(一)(二)、(三)(四)、(五)(六)，只有同列各學期格明確時才拆成每學期獨立一門，credits取該學期學分，不能取時數或兩學期總和；請優先讀取該列上學期、下學期的學分格完成拆分，不能僅因課名含兩個序號就丟入reviewRows。合併課程可輸出semesterEntries:[{term:"1-1",credits:2},{term:"1-2",credits:2}]，順序與課名序號對應；term必須來自原圖學年與學期格。只有真的看不清楚時才標needsReview。即使待核對也須分成個別課名，並保留看得清楚的學期與學分，不可把整列黏在一起或丟棄。每門courses另附sourcePage、rawName、annotation；不確定的列放reviewRows，不可悄悄刪除。0學分保留。分類小計與必修加總應核對原表；表列選修總和不一定等於畢業所需選修學分，不可據此改門檻。最後重新按原圖逐列檢查漏列、欄位偏移與錯字。
 你是明新科技大學資源教室「學分檢核系統」的時序表辨識器。請只依圖片中可見資料辨識，不得猜測不存在的課程、學分或學期。輸出必須是 JSON，不要 Markdown。格式：{"curriculum":{"totalCredits":數字,"targets":{"校必修":數字,"院必修":數字,"專業必修":數字,"專業選修":數字},"courses":[{"term":"1-1","category":"校必修|院必修|專業必修|專業選修","name":"課程名稱","credits":數字}],"warnings":["需要人工確認的事項"]}}。term 只能使用 1-1、1-2、2-1、2-2…8-2。0 學分必修仍須保留。若原表使用「系必修／系選修」，請分別正規化為「專業必修／專業選修」。分類通識若能明確辨識，課名保留「分類通識」字樣；不要自行判定學生是否已通過。重複課程若屬不同學期請分別保留。無法確定時不要硬猜，請在 warnings 說明。`;
 const CREDIT_TRANSCRIPT=`你是明新科技大學資源教室「學分檢核系統」的成績辨識器。只依圖片中實際可見的成績表格辨識，不得猜測、補課或省略看得見的列。
 
@@ -112,15 +112,22 @@ function splitCurriculumName(value){
 function expandCurriculumRow(c){
  const names=splitCurriculumName(c?.name||c?.rawName),entries=Array.isArray(c?.semesterEntries)?c.semesterEntries:[];
  if(names.length<2)return [c];
- return names.map((name,i)=>{const evidence=entries.length===names.length?entries[i]:null;return {...c,name,rawName:c.rawName||c.name,term:evidence?.term||'',credits:evidence?.credits??null,needsReview:c.needsReview===true||!evidence,reason:evidence?c.reason:'已拆分課名，請核對原表對應學期與各學期學分'};});
+ return names.map((name,i)=>{const evidence=entries.length===names.length?entries[i]:null;return {...c,name,rawName:c.rawName||c.name,term:evidence?.term||'',yearIndex:evidence?.yearIndex,semesterIndex:evidence?.semesterIndex,yearHeader:evidence?.yearHeader||'',semesterHeader:evidence?.semesterHeader||'',credits:evidence?.credits??null,needsReview:c.needsReview===true||!evidence,reason:evidence?c.reason:'已拆分課名，請核對原表對應學期與各學期學分'};});
+}
+function curriculumTermEvidence(c){
+ const year=Number(c?.yearIndex),semester=Number(c?.semesterIndex);
+ if(!Number.isInteger(year)||year<1||year>8||![1,2].includes(semester))return null;
+ return {term:year+'-'+semester,yearIndex:year,semesterIndex:semester,yearHeader:String(c.yearHeader||''),semesterHeader:String(c.semesterHeader||'')};
 }
 function normalizeCurriculum(payload){
  const src=payload?.curriculum||payload||{},allowed=new Set(['校必修','院必修','專業必修','專業選修']),mapCategory=v=>v==='系必修'?'專業必修':v==='系選修'?'專業選修':v;
  const courses=[],reviewRows=[],warnings=Array.isArray(src.warnings)?src.warnings.map(String):[];
  const input=[...(Array.isArray(src.courses)?src.courses:[]),...(Array.isArray(src.reviewRows)?src.reviewRows.slice(0,200).map(c=>typeof c==='string'?{name:c,needsReview:true}:{...c,needsReview:true}):[])];
  for(const [i,c] of input.flatMap(expandCurriculumRow).entries()){
- const name=String(c?.name||'').trim(),credits=c?.credits===null||c?.credits===''||c?.credits===undefined?NaN:Number(c.credits),row={term:String(c?.term||'').trim(),category:mapCategory(String(c?.category||'').trim()),name,credits,rawName:String(c?.rawName||name),annotation:String(c?.annotation||''),sourcePage:Number(c?.sourcePage)||null};
- if(!/^([1-8])-[12]$/.test(row.term)||!allowed.has(row.category)||!name||!Number.isFinite(credits)||credits<0||credits>9||!Number.isInteger(credits*2)||c.needsReview===true){reviewRows.push({...row,credits:Number.isFinite(credits)?credits:null,reason:String(c.reason||'學期、類別、課名或學分待核對')});warnings.push(`第${i+1}列「${name||'課名不清'}」需核對：${c.reason||'學期、類別或學分不清楚'}。`);continue}courses.push(row);
+ const evidence=curriculumTermEvidence(c),suppliedTerm=String(c?.term||'').trim();
+ if(evidence&&suppliedTerm&&suppliedTerm!==evidence.term)warnings.push('「'+String(c.name||'')+'」學期與學年標頭不一致，已依學年/上下學期證據改為'+evidence.term+'，請核對原圖。');
+ const name=String(c?.name||'').trim(),credits=c?.credits===null||c?.credits===''||c?.credits===undefined?NaN:Number(c.credits),row={term:evidence?.term||suppliedTerm,...(evidence||{}),category:mapCategory(String(c?.category||'').trim()),name,credits,rawName:String(c?.rawName||name),annotation:String(c?.annotation||''),sourcePage:Number(c?.sourcePage)||null};
+ if(!/^([1-8])-[12]$/.test(row.term)||!allowed.has(row.category)||!name||!Number.isFinite(credits)||credits<0||credits>9||!Number.isInteger(credits*2)||c.needsReview===true||!evidence){reviewRows.push({...row,credits:Number.isFinite(credits)?credits:null,reason:String(c.reason||(!evidence?'缺少學年與上下學期定位證據，請核對原圖標頭':'學期、類別、課名或學分待核對'))});warnings.push(`第${i+1}列「${name||'課名不清'}」需核對：${c.reason||'學期、類別或學分不清楚'}。`);continue}courses.push(row);
  }
  const t=src.targets||{};return {totalCredits:Number(src.totalCredits)||0,targets:{'校必修':Number(t['校必修'])||0,'院必修':Number(t['院必修'])||0,'專業必修':Number(t['專業必修']??t['系必修'])||0,'專業選修':Number(t['專業選修']??t['系選修'])||0},courses,reviewRows,warnings};
 }
