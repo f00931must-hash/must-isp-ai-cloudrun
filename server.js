@@ -2,7 +2,7 @@ const http=require('http');
 const PORT=process.env.PORT||8080;
 const KEY=process.env.GEMINI_API_KEY||'';
 const MODELS=['gemini-3.6-flash','gemini-3.5-flash-lite','gemini-3.1-flash-lite'];
-const VERSION='1.4.3';
+const VERSION='1.4.4';
 const {findSources,schoolFetch}=require('./curriculum-sources');
 
 const ISP_SUMMARY=`你是臺灣大專校院資源教室的 ISP 行政文字助理。只依使用者提供內容潤飾，不得新增未提供的學生資訊、診斷、原因、能力、需求、服務或事件。保留原意、日期、數字、程度與事件順序。使用正式、客觀、中性、適合 ISP 文件的繁體中文。只要按下 AI 潤飾就必須實質改寫，至少改善用詞、句型、語序、行政文體或標點其中一項，不得直接照返原文，也不得回覆「內容已經很好」或「無需修改」。原文有列點時，列點數量、順序、前綴與換行必須完全保留，不得合併、拆分、刪除或新增列點。原文沒有列點時不得自行新增列點。原則上整理為至少30個中文字；可延展原文已明確表達的意思，但不得虛構。每一句都必須完整收尾，不得以「且、並、以及、於……中、於……時」等尚未完成的語句結束。只輸出可直接貼回欄位的文字，不要標題、前言、說明、引號或 Markdown。`;
@@ -99,7 +99,7 @@ function parseJsonText(text){const cleaned=clean(text);try{return JSON.parse(cle
 function normalizeImages(body,max){const images=Array.isArray(body?.images)?body.images:[];if(!images.length)throw Object.assign(new Error('請至少提供一張圖片'),{status:400});if(images.length>max)throw Object.assign(new Error(`一次最多處理 ${max} 張圖片`),{status:400});return images.map(x=>({mimeType:String(x?.mimeType||'image/jpeg'),data:String(x?.data||'')})).filter(x=>x.data);}
 function transcriptReferenceText(context){const targetTerm=String(context?.targetTerm||'').trim(),courses=[...new Set((Array.isArray(context?.referenceCourses)?context.referenceCourses:[]).map(x=>String(x||'').trim()).filter(Boolean))].slice(0,120);if(!targetTerm&&!courses.length)return '';return `\n\n【本次辨識參考資訊】\n學生選擇的年級／學期：${targetTerm||'未提供'}\n該學期時序表課名參考：${courses.length?courses.join('、'):'未提供'}\n注意：這份清單只能協助 OCR 校正。圖片中沒有出現的課程不得新增，也不得因清單存在就判定學生有修課。`;}
 function curriculumReferenceText(context){const pages=Array.isArray(context.referenceText)?context.referenceText.slice(0,12):[];return '\n【PDF輔助文字，僅供校字，不代表欄位順序，仍以圖片座標為準】\n'+pages.map(p=>`頁${Number(p.page)||'?'}：${String(p.text||'').slice(0,9000)}`).join('\n').slice(0,36000);}
-const CURRICULUM_ROW_SCHEMA={type:'OBJECT',properties:{name:{type:'STRING'},rawName:{type:'STRING'},category:{type:'STRING',enum:['校必修','院必修','專業必修','專業選修','待核對']},credits:{type:'NUMBER',nullable:true},yearIndex:{type:'INTEGER',description:'原圖第幾學年1至8；無法判讀填0，不能用民國年度'},semesterIndex:{type:'INTEGER',description:'原圖上學期1、下學期2；無法判讀填0'},needsReview:{type:'BOOLEAN'},reason:{type:'STRING'},annotation:{type:'STRING'}},required:['name','category','credits','yearIndex','semesterIndex','needsReview']};
+const CURRICULUM_ROW_SCHEMA={type:'OBJECT',properties:{name:{type:'STRING',description:'完整課名，必須保留(一)(二)(三)等單門序號；只能移除前置菱形與領域代碼'},rawName:{type:'STRING'},category:{type:'STRING',enum:['校必修','院必修','專業必修','專業選修','待核對']},credits:{type:'NUMBER',nullable:true},yearIndex:{type:'INTEGER',description:'原圖第幾學年1至8；無法判讀填0，不能用民國年度'},semesterIndex:{type:'INTEGER',description:'原圖上學期1、下學期2；無法判讀填0'},needsReview:{type:'BOOLEAN'},reason:{type:'STRING'},annotation:{type:'STRING'}},required:['name','category','credits','yearIndex','semesterIndex','needsReview']};
 const CURRICULUM_SCHEMA={type:'OBJECT',properties:{curriculum:{type:'OBJECT',properties:{totalCredits:{type:'NUMBER'},targets:{type:'OBJECT',properties:{'校必修':{type:'NUMBER'},'院必修':{type:'NUMBER'},'專業必修':{type:'NUMBER'},'專業選修':{type:'NUMBER'}},required:['校必修','院必修','專業必修','專業選修']},courses:{type:'ARRAY',items:CURRICULUM_ROW_SCHEMA,description:'每個有印出學分的學期格獨立一門；合併課名先拆成個別序號；空白格不輸出'},warnings:{type:'ARRAY',items:{type:'STRING'}}},required:['totalCredits','targets','courses','warnings']}},required:['curriculum']};
 async function callVisionModel(images,kind,model,timeoutMs,context={}){
   const instruction=(kind==='curriculum'?CREDIT_CURRICULUM:CREDIT_TRANSCRIPT)+(kind==='transcript'?transcriptReferenceText(context):curriculumReferenceText(context)),c=new AbortController(),timer=setTimeout(()=>c.abort(),timeoutMs);
@@ -108,6 +108,11 @@ async function callVisionModel(images,kind,model,timeoutMs,context={}){
 function rawTranscriptCompleteness(payload){const src=payload?.transcript||payload||{},rows=Array.isArray(src.courses)?src.courses.length:0,estimate=Number(src.visibleRowCountEstimate);return {rows,estimate:Number.isFinite(estimate)&&estimate>=0?estimate:rows};}
 async function callVisionFallback(images,kind,context={}){let lastError=null,best=null;for(let i=0;i<MODELS.length;i++){const model=MODELS[i];try{const data=await callVisionModel(images,kind,model,kind==='curriculum'?(i===0?28000:25000):(i===0?17000:20000),context);if(kind!=='transcript')return {data,model};const check=rawTranscriptCompleteness(data);if(!best||check.rows>best.check.rows)best={data,model,check};if(check.estimate<=check.rows)return {data,model};console.warn('Credit transcript completeness retry',{model,visibleRowCountEstimate:check.estimate,returnedRows:check.rows});if(i<MODELS.length-1){await sleep(250);continue;}return {data:best.data,model:best.model,completenessWarning:true};}catch(error){lastError=error;console.warn('Credit AI attempt failed',{kind,model,status:error?.status||0,name:error?.name||'',message:String(error?.message||'').slice(0,120)});if(!isRetryable(error)&&error?.status!==400)throw error;if(error?.status===400)throw error;if(i<MODELS.length-1)await sleep(250);}}if(best)return {data:best.data,model:best.model,completenessWarning:true};throw lastError||new Error('AI 服務暫時無法使用');}
 // Combined names are split structurally. Semester assignments require explicit image evidence.
+function canonicalCurriculumName(c){
+ const strip=value=>String(value||'').replace(/^[\s◇◆◊◎○●☆★※＊*]+(?:\s*[ABＡＢ](?=[\u3400-\u9fff]))?\s*/u,'').trim();
+ const name=strip(c?.name),raw=strip(c?.rawName),match=raw.match(/^(.*?)([（(][一二三四五六七八1-8][）)])$/);
+ return match&&name===match[1].trim()?raw:name;
+}
 function splitCurriculumName(value){
  const name=String(value||'').trim(),match=name.match(/^(.*?)([（(][一二三四五六七八1-8][）)](?:\s*[,、，]?\s*[（(][一二三四五六七八1-8][）)])+)$/);
  if(!match)return [name];const suffixes=match[2].match(/[（(][一二三四五六七八1-8][）)]/g);return suffixes.map(suffix=>match[1].trim()+suffix);
@@ -129,7 +134,7 @@ function normalizeCurriculum(payload){
  for(const [i,c] of input.flatMap(expandCurriculumRow).entries()){
  const evidence=curriculumTermEvidence(c),suppliedTerm=String(c?.term||'').trim();
  if(evidence&&suppliedTerm&&suppliedTerm!==evidence.term)warnings.push('「'+String(c.name||'')+'」學期與學年標頭不一致，已依學年/上下學期證據改為'+evidence.term+'，請核對原圖。');
- const name=String(c?.name||'').trim(),credits=c?.credits===null||c?.credits===''||c?.credits===undefined?NaN:Number(c.credits),row={term:evidence?.term||suppliedTerm,...(evidence||{}),category:mapCategory(String(c?.category||'').trim()),name,credits,rawName:String(c?.rawName||name),annotation:String(c?.annotation||''),sourcePage:Number(c?.sourcePage)||null};
+ const name=canonicalCurriculumName(c),credits=c?.credits===null||c?.credits===''||c?.credits===undefined?NaN:Number(c.credits),row={term:evidence?.term||suppliedTerm,...(evidence||{}),category:mapCategory(String(c?.category||'').trim()),name,credits,rawName:String(c?.rawName||name),annotation:String(c?.annotation||''),sourcePage:Number(c?.sourcePage)||null};
  if(!/^([1-8])-[12]$/.test(row.term)||!allowed.has(row.category)||!name||!Number.isFinite(credits)||credits<0||credits>9||!Number.isInteger(credits*2)||c.needsReview===true||!evidence){reviewRows.push({...row,credits:Number.isFinite(credits)?credits:null,reason:String(c.reason||(!evidence?'缺少學年與上下學期定位證據，請核對原圖標頭':'學期、類別、課名或學分待核對'))});warnings.push(`第${i+1}列「${name||'課名不清'}」需核對：${c.reason||'學期、類別或學分不清楚'}。`);continue}courses.push(row);
  }
  const t=src.targets||{};return {totalCredits:Number(src.totalCredits)||0,targets:{'校必修':Number(t['校必修'])||0,'院必修':Number(t['院必修'])||0,'專業必修':Number(t['專業必修']??t['系必修'])||0,'專業選修':Number(t['專業選修']??t['系選修'])||0},courses,reviewRows,warnings};
